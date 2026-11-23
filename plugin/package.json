@@ -1,0 +1,29 @@
+{
+  "name": "@local/multica-reverse",
+  "version": "0.2.1",
+  "private": true,
+  "type": "module",
+  "description": "Operate a Multica workspace from DeepSeek Harness: a sidebar panel plus agent tools for issues, comments and statuses.",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  }
+}

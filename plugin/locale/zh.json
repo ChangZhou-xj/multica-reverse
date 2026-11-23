@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Multica 工作区",
+    "description": "在 Harness 会话里读取和更新 Multica 的工单、评论与状态。"
+  }
+}

@@ -63,6 +63,10 @@ profile 名可在 `~/.multica/profiles/` 里查看；工作区 id 从 Multica �
 
 | 工具 | 作用 | 写操作 |
 | --- | --- | --- |
+| `multica_list_workspaces` | 列出所有工作区（id/名称/slug/前缀） | |
+| `multica_list_projects` | 列出工作区的项目，支持 `workspace` 参数 | |
+| `multica_get_project` | 按 UUID 或标题读取单个项目详情 | |
+| `multica_issue_stats` | 按状态/优先级统计，列出过期与快到期工单 | |
 | `multica_list_issues` | 列出工单，支持 `status` / `query` / `limit` | |
 | `multica_get_issue` | 取单个工单（UUID 或人类可读的编号都行） | |
 | `multica_list_comments` | 读评论，可指定 `limit` | |
@@ -78,6 +82,8 @@ profile 名可在 `~/.multica/profiles/` 里查看；工作区 id 从 Multica �
 要点：
 
 - `multica_issue_update` 默认**不会触发 agent**（`suppress_run` 默认 true）。要派活请显式传 `suppress_run: false`。
+- `multica_list_issues` 支持 `project` / `assignee` / `priority` / `due_before` 筛选，以及 `workspace` 参数（传 UUID/名称/slug/前缀）；不传则用默认工作区。
+- `multica_issue_stats` 的 `within_days` 默认 7 天；过期/快到期清单会自动排除 done/cancelled 状态。
 - 想在评论里触发 agent，先用 `multica_list_agents` 拿到准确的 UUID，再传给 `mention_agent_id`；工具会在正文末尾自动补上 `[@名字](mention://agent/<uuid>)`。**只有 agent / squad 会入队 run**，member 只会渲染链接。
 - 4 个写工具受 Harness 审批策略管辖：策略是 `ask` 时弹确认框；策略是 `never`（"不问，直接做"）时自动放行。插件通过 `approval.overrideOf(session)` 判断策略，不会出现"问了必被拒导致工具全废"的死锁。
 

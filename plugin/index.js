@@ -81,6 +81,47 @@ async function api(method, path, body) {
 
 const q = (extra = '') => `?workspace_id=${encodeURIComponent(workspaceId())}${extra}`
 
+/** Resolve a workspace UUID / name / slug / prefix to its UUID. */
+async function resolveWorkspace(value) {
+  if (!value) return workspaceId()
+  const v = String(value).trim()
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(v)) return v
+  const list = await api('GET', '/api/workspaces')
+  const hit = (Array.isArray(list) ? list : []).find(
+    (w) =>
+      w.id === v ||
+      w.slug === v ||
+      w.name === v ||
+      (w.issue_prefix || '').toLowerCase() === v.toLowerCase(),
+  )
+  if (!hit) throw new Error(`Unknown Multica workspace: ${value}`)
+  return hit.id
+}
+
+/** Resolve a project UUID or title to its UUID within a workspace. */
+async function resolveProjectId(value, ws) {
+  const v = String(value).trim()
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(v)) return v
+  const data = await api('GET', `/api/projects?${new URLSearchParams({ workspace_id: ws, limit: '100' })}`)
+  const hit = (data.projects || []).find(
+    (p) => p.id === v || p.title === v || (p.title || '').toLowerCase() === v.toLowerCase(),
+  )
+  if (!hit) throw new Error(`Unknown Multica project: ${value}`)
+  return hit.id
+}
+
+/** Resolve an agent UUID or name to its UUID. */
+async function resolveAgentId(value) {
+  const v = String(value).trim()
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(v)) return v
+  const list = await api('GET', '/api/agents')
+  const hit = (Array.isArray(list) ? list : []).find(
+    (a) => a.id === v || a.name === v || (a.name || '').toLowerCase() === v.toLowerCase(),
+  )
+  if (!hit) throw new Error(`Unknown Multica agent: ${value}`)
+  return hit.id
+}
+
 /** Accept a UUID or a human key such as `ABC-8`; the API resolves both. */
 function issueRef(value) {
   const trimmed = String(value || '').trim()
@@ -103,6 +144,8 @@ const issueSummary = (i) => ({
   key: i.identifier,
   status: i.status,
   assignee: i.assignee_type ? `${i.assignee_type}:${String(i.assignee_id).slice(0, 8)}` : '',
+  priority: i.priority || '',
+  due: String(i.due_date || '').slice(0, 10),
   title: i.title,
 })
 
@@ -110,12 +153,17 @@ const tools = [
   {
     name: 'multica_list_issues',
     description:
-      'List issues in the configured Multica workspace. Filter by status key (backlog, todo, in_progress, in_review, blocked, done, cancelled) or by a search term. Read-only.',
+      'List issues in a Multica workspace. Filter by status, free-text query, project, assignee, priority or due date. Accepts a workspace UUID/name/slug/prefix; defaults to the configured workspace. Read-only.',
     parameters: {
       type: 'object',
       properties: {
         status: { type: 'string', description: 'Status key to filter on, e.g. in_review.' },
         query: { type: 'string', description: 'Free-text search across issue titles.' },
+        workspace: { type: 'string', description: 'Workspace UUID, name, slug or prefix. Defaults to configured workspace.' },
+        project: { type: 'string', description: 'Project UUID or title to filter on.' },
+        assignee: { type: 'string', description: 'Agent UUID or name to filter on.' },
+        priority: { type: 'string', description: 'Priority key: low, medium, high, urgent.' },
+        due_before: { type: 'string', description: 'Keep issues due on or before YYYY-MM-DD.' },
         limit: { type: 'number', description: 'Maximum rows to return; defaults to 20.' },
         offset: { type: 'number', description: 'Rows to skip; defaults to 0.' },
       },
@@ -124,16 +172,24 @@ const tools = [
     output: {
       schema: { type: 'object' },
       render: (_args, value) =>
-        text(`Multica issues (${value.total} matched)\n\n${table(value.issues, ['key', 'status', 'assignee', 'title'])}`),
+        text(`Multica issues (${value.total} matched)\n\n${table(value.issues, ['key', 'status', 'priority', 'due', 'assignee', 'title'])}`),
     },
     async execute(args = {}) {
-      const params = new URLSearchParams({ workspace_id: workspaceId() })
+      const ws = await resolveWorkspace(args.workspace)
+      const params = new URLSearchParams({ workspace_id: ws })
       if (args.status) params.set('status', String(args.status))
       if (args.query) params.set('q', String(args.query))
+      if (args.project) params.set('project_id', await resolveProjectId(args.project, ws))
+      if (args.assignee) params.set('assignee_id', await resolveAgentId(args.assignee))
+      if (args.priority) params.set('priority', String(args.priority))
       params.set('limit', String(Math.min(Math.max(Number(args.limit) || 20, 1), 100)))
       if (args.offset) params.set('offset', String(Number(args.offset) || 0))
       const data = await api('GET', `/api/issues?${params}`)
-      const issues = (data.issues || []).map(issueSummary)
+      let issues = (data.issues || []).map(issueSummary)
+      if (args.due_before) {
+        const before = String(args.due_before).slice(0, 10)
+        issues = issues.filter((i) => i.due && i.due.slice(0, 10) <= before)
+      }
       return { total: data.total ?? issues.length, issues }
     },
   },
@@ -508,6 +564,199 @@ const tools = [
       return { id, resolved }
     },
     presentCall: (args) => ({ card: 'generic', title: 'Resolve Multica comment', kind: 'edit', rawInput: args.comment_id }),
+  },
+  {
+    name: 'multica_list_workspaces',
+    description:
+      'List all Multica workspaces visible to the configured account, with id, name, slug and issue prefix. Read-only.',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    output: {
+      schema: { type: 'object' },
+      render: (_args, value) =>
+        text(`Multica workspaces (${value.total})\n\n${table(value.workspaces, ['name', 'slug', 'prefix', 'id'])}`),
+    },
+    async execute() {
+      const list = await api('GET', '/api/workspaces')
+      const workspaces = (Array.isArray(list) ? list : []).map((w) => ({
+        id: w.id,
+        name: w.name,
+        slug: w.slug,
+        prefix: w.issue_prefix || '',
+      }))
+      return { total: workspaces.length, workspaces }
+    },
+  },
+  {
+    name: 'multica_list_projects',
+    description:
+      'List projects in a Multica workspace. Accepts a workspace UUID, name, slug or issue prefix; defaults to the configured workspace. Read-only.',
+    parameters: {
+      type: 'object',
+      properties: {
+        workspace: { type: 'string', description: 'Workspace UUID, name, slug or prefix. Defaults to configured workspace.' },
+      },
+      additionalProperties: false,
+    },
+    output: {
+      schema: { type: 'object' },
+      render: (_args, value) =>
+        text(`Multica projects in ${value.workspace} (${value.total})\n\n${table(value.projects, ['title', 'status', 'issues', 'done', 'id'])}`),
+    },
+    async execute(args = {}) {
+      const ws = await resolveWorkspace(args.workspace)
+      const data = await api('GET', `/api/projects?${new URLSearchParams({ workspace_id: ws, limit: '100' })}`)
+      const projects = (data.projects || []).map((p) => ({
+        id: p.id,
+        title: p.title,
+        description: p.description || '',
+        status: p.status,
+        issues: p.issue_count ?? 0,
+        done: p.done_count ?? 0,
+      }))
+      return { workspace: ws, total: projects.length, projects }
+    },
+  },
+  {
+    name: 'multica_get_project',
+    description:
+      'Read one Multica project by UUID or title, including description, status, lead and issue counts. Read-only.',
+    parameters: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: 'Project UUID or exact title.' },
+        workspace: { type: 'string', description: 'Workspace UUID, name, slug or prefix. Defaults to configured workspace.' },
+      },
+      required: ['project'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: { type: 'object' },
+      render: (_args, value) =>
+        text(
+          [
+            `${value.title}  ${value.status}  ${value.id}`,
+            `workspace: ${value.workspace_id}`,
+            `description: ${value.description || '(none)'}`,
+            `issues: ${value.issue_count}  done: ${value.done_count}`,
+            `lead: ${value.lead || '(unassigned)'}`,
+          ].join('\n'),
+        ),
+    },
+    async execute(args = {}) {
+      const ref = String(args.project || '').trim()
+      if (!ref) throw new Error('project is required (UUID or title)')
+      const ws = await resolveWorkspace(args.workspace)
+      let id = ref
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(ref)) {
+        const data = await api('GET', `/api/projects?${new URLSearchParams({ workspace_id: ws, limit: '100' })}`)
+        const hit = (data.projects || []).find(
+          (p) => p.id === ref || p.title === ref || (p.title || '').toLowerCase() === ref.toLowerCase(),
+        )
+        if (!hit) throw new Error(`Project not found: ${ref}`)
+        id = hit.id
+      }
+      const p = await api('GET', `/api/projects/${encodeURIComponent(id)}?${new URLSearchParams({ workspace_id: ws })}`)
+      return {
+        id: p.id,
+        title: p.title,
+        description: p.description || '',
+        status: p.status,
+        workspace_id: p.workspace_id,
+        issue_count: p.issue_count ?? 0,
+        done_count: p.done_count ?? 0,
+        lead: p.lead_type ? `${p.lead_type}:${p.lead_id}` : '',
+      }
+    },
+  },
+  {
+    name: 'multica_issue_stats',
+    description:
+      'Aggregate Multica issues into counts by status, priority and assignee, plus overdue and due-soon lists. Read-only; supports workspace/project/assignee/priority/status filters.',
+    parameters: {
+      type: 'object',
+      properties: {
+        workspace: { type: 'string', description: 'Workspace UUID, name, slug or prefix.' },
+        project: { type: 'string', description: 'Project UUID or title to restrict stats.' },
+        assignee: { type: 'string', description: 'Agent UUID or name to restrict stats.' },
+        priority: { type: 'string', description: 'Priority key: low, medium, high, urgent.' },
+        status: { type: 'string', description: 'Status key to restrict stats.' },
+        within_days: { type: 'number', description: 'Due-soon window in days; defaults to 7.' },
+      },
+      additionalProperties: false,
+    },
+    output: {
+      schema: { type: 'object' },
+      render: (_args, value) =>
+        text(
+          [
+            `Multica issue stats — ${value.scope}`,
+            `Total: ${value.total}`,
+            '',
+            'By status:', table(value.by_status, ['status', 'count']),
+            '',
+            'By priority:', table(value.by_priority, ['priority', 'count']),
+            '',
+            `Overdue (${value.overdue.length}):`,
+            table(value.overdue, ['key', 'due', 'title']),
+            '',
+            `Due within ${value.within_days}d (${value.due_soon.length}):`,
+            table(value.due_soon, ['key', 'due', 'title']),
+          ].join('\n'),
+        ),
+    },
+    async execute(args = {}) {
+      const ws = await resolveWorkspace(args.workspace)
+      const params = new URLSearchParams({ workspace_id: ws, limit: '100' })
+      const parts = []
+      if (args.project) {
+        params.set('project_id', await resolveProjectId(args.project, ws))
+        parts.push(`project=${args.project}`)
+      }
+      if (args.assignee) {
+        params.set('assignee_id', await resolveAgentId(args.assignee))
+        parts.push(`assignee=${args.assignee}`)
+      }
+      if (args.priority) { params.set('priority', String(args.priority)); parts.push(`priority=${args.priority}`) }
+      if (args.status) { params.set('status', String(args.status)); parts.push(`status=${args.status}`) }
+      const within = Math.min(Math.max(Number(args.within_days) || 7, 1), 365)
+      const data = await api('GET', `/api/issues?${params}`)
+      const issues = data.issues || []
+      const count = (key) => {
+        const m = new Map()
+        for (const i of issues) {
+          const k = String(i[key] ?? '(none)')
+          m.set(k, (m.get(k) || 0) + 1)
+        }
+        return [...m.entries()]
+          .map(([k, v]) => ({ [key]: k, count: v }))
+          .sort((a, b) => b.count - a.count)
+      }
+      const today = new Date()
+      today.setHours(0, 0, 0, 0)
+      const soon = new Date(today.getTime() + within * 86400000)
+      const terminal = new Set(['done', 'cancelled', 'completed'])
+      const dueRow = (i) => ({ key: i.identifier, due: String(i.due_date || '').slice(0, 10), title: i.title })
+      const overdue = []
+      const dueSoon = []
+      for (const i of issues) {
+        if (!i.due_date || terminal.has(i.status)) continue
+        const d = new Date(String(i.due_date).slice(0, 10))
+        if (Number.isNaN(d.getTime())) continue
+        if (d < today) overdue.push(dueRow(i))
+        else if (d <= soon) dueSoon.push(dueRow(i))
+      }
+      overdue.sort((a, b) => a.due.localeCompare(b.due))
+      dueSoon.sort((a, b) => a.due.localeCompare(b.due))
+      return {
+        scope: parts.length ? parts.join(', ') : `workspace ${ws}`,
+        total: data.total ?? issues.length,
+        by_status: count('status'),
+        by_priority: count('priority'),
+        overdue,
+        due_soon: dueSoon,
+        within_days: within,
+      }
+    },
   },
 ]
 
@@ -930,7 +1179,7 @@ export function apply(ctx, config = {}) {
           name: 'multica-reverse',
           order: 200,
           text: [
-            'Multica workspace tools are available (multica_*): list and read issues, comments, timeline, agents and runtimes, then comment or change status.',
+            'Multica workspace tools are available (multica_*): list workspaces and projects, read/list/filter issues (by project, assignee, priority, due date), get issue stats with overdue/due-soon lists, plus comments, timeline, agents and runtimes. Workspace arguments accept a UUID, name, slug or issue prefix; default is the configured workspace.',
             'Prefer them over shelling out to the multica CLI. Status and assignee changes start the assigned agent and cost tokens, so leave suppress_run at its default true unless the user explicitly wants the agent to start now.',
             'A comment body only triggers an agent through the exact link form [@Name](mention://agent/<uuid>); plain text or @Name does nothing.',
           ].join(' '),

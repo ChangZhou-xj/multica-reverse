@@ -114,6 +114,17 @@ profile 名可在 `~/.multica/profiles/` 里查看；工作区 id 从 Multica �
 
 解析输出注意：`issue list --output json` 返回的是 `{issues:[], total, ...}`，不是裸数组；`--output json` 走 stdout，警告走 stderr，**不要用 `2>&1` 混流**。
 
+## 内嵌原生页面（多工作区）
+
+面板顶部可在 **原生页面** 与 **精简面板** 之间切换：
+
+- **精简面板**：轻量的工单列表 + 详情，支持状态筛选、搜索、改状态、发评论、@ agent。
+- **原生页面**：在面板里直接嵌入 Multica 官方的工单看板，你的所有工作区都出现在下拉框里，切换即可浏览对应工作区。
+
+原生页面通过插件内置的本地同站反向代理访问 Multica（默认 `127.0.0.1:18080`，可用 `MULTICA_PROXY_PORT` 修改）。代理会在 Host 侧给 `/api/*` 请求自动加上已配置的 Bearer token，因此内嵌页面无需单独登录、也无需输入验证码，打开即是登录态。
+
+> 说明：这是为解决跨域 iframe 被视为第三方、登录 cookie 被拦截而设计的。代理仅监听本机 loopback，Multica 凭证仍只留在 Host 侧，不会暴露给浏览器或代理客户端以外。
+
 ## 许可
 
 MIT —— 见 [LICENSE](LICENSE)。

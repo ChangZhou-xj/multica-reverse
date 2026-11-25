@@ -10,6 +10,8 @@ import { readFile } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { createServer, request as httpRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
 
 export const name = 'multica-reverse'
 export const inject = ['tools']
@@ -536,6 +538,109 @@ function approvalUnavailable(ctx, exec) {
  */
 const PANEL_PREFIX = '/api/multica-reverse'
 
+// Same-site reverse proxy: the Multica web UI authenticates with host-only
+// cookies. A cross-origin iframe (Multica host vs the Harness origin) is a
+// third-party context, so those cookies are blocked and login fails with
+// "missing authorization". Serving the native UI through a 127.0.0.1 port
+// makes it same-site with the Harness page, so the browser keeps the cookies.
+// API calls are auto-authenticated with the Host-side bearer token, so the
+// embedded page passes the /api/me login check without any manual login.
+// Multica HTML uses root-relative /_next/... paths, which hit this proxy
+// directly because it is its own port.
+const PROXY_PORT = Number(process.env.MULTICA_PROXY_PORT || 18080)
+let proxyBaseUrl = ''
+let proxyReady = null
+let proxyServer = null
+
+function createProxyServer() {
+  return new Promise((resolve, reject) => {
+    const server = createServer((req, res) => {
+      ;(async () => {
+        try {
+          const cred = await credentials()
+          const upstream = new URL(cred.base)
+          const secure = upstream.protocol === 'https:'
+          const transport = secure ? httpsRequest : httpRequest
+          const upstreamOrigin = `${upstream.protocol}//${upstream.host}`
+          const headers = { ...req.headers, host: upstream.host }
+          // Make proxied requests look like they originate from Multica itself.
+          if (headers.origin) headers.origin = upstreamOrigin
+          if (headers.referer) {
+            headers.referer = String(headers.referer).replace(proxyBaseUrl, upstreamOrigin)
+          }
+          // Auto-authenticate API calls with the Host-side bearer token so the
+          // embedded page passes /api/me without a separate browser login.
+          if (req.url && req.url.startsWith('/api/')) {
+            headers.authorization = `Bearer ${cred.token}`
+          }
+          delete headers['accept-encoding']
+          const uReq = transport(
+            {
+              hostname: upstream.hostname,
+              port: upstream.port || (secure ? 443 : 80),
+              method: req.method,
+              path: req.url,
+              headers,
+            },
+            (uRes) => {
+              const out = { ...uRes.headers }
+              if (out.location) {
+                out.location = String(out.location).replace(
+                  `${upstream.protocol}//${upstream.host}`,
+                  proxyBaseUrl,
+                )
+              }
+              if (out['set-cookie']) {
+                out['set-cookie'] = (Array.isArray(out['set-cookie'])
+                  ? out['set-cookie']
+                  : [out['set-cookie']]
+                ).map((c) => c.replace(/;\s*Domain=[^;]+/i, ''))
+              }
+              res.writeHead(uRes.statusCode || 502, out)
+              uRes.pipe(res)
+            },
+          )
+          uReq.on('error', () => {
+            if (!res.headersSent) {
+              res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' })
+            }
+            res.end('Multica proxy: upstream error')
+          })
+          req.pipe(uReq)
+        } catch (err) {
+          if (!res.headersSent) {
+            res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' })
+          }
+          res.end(`Multica proxy: ${err.message || err}`)
+        }
+      })()
+    })
+    server.on('error', reject)
+    server.listen(PROXY_PORT, '127.0.0.1', () => resolve(server))
+  })
+}
+
+async function ensureProxy() {
+  if (!proxyBaseUrl) proxyBaseUrl = `http://127.0.0.1:${PROXY_PORT}`
+  if (!proxyReady) {
+    proxyReady = createProxyServer()
+      .then((server) => {
+        proxyServer = server
+        return proxyBaseUrl
+      })
+      .catch((err) => {
+        // Another DSH profile (web/desktop) may already own this port. Both
+        // profiles talk to the same Multica server, so reuse that proxy.
+        if (err && err.code === 'EADDRINUSE') {
+          return proxyBaseUrl
+        }
+        proxyReady = null
+        throw err
+      })
+  }
+  return proxyReady
+}
+
 function reply(res, status, value) {
   const body = JSON.stringify(value)
   res.writeHead(status, {
@@ -614,6 +719,30 @@ function registerPanelRoutes(ctx) {
             })),
             runtimes: (Array.isArray(runtimes) ? runtimes : []).map((r) => ({
               id: r.id, name: r.name, status: r.status || '',
+            })),
+          })
+        } catch (err) {
+          reply(res, 502, { ok: false, error: String(err.message || err) })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: `${PANEL_PREFIX}/workspaces`,
+      handler: async (req, res) => {
+        if (!guard(req, res)) return
+        try {
+          const [list] = await Promise.all([api('GET', `/api/workspaces`)])
+          const base = await ensureProxy()
+          reply(res, 200, {
+            ok: true,
+            base,
+            current: workspaceId(),
+            workspaces: (Array.isArray(list) ? list : []).map((w) => ({
+              id: w.id,
+              name: w.name,
+              slug: w.slug,
+              prefix: w.issue_prefix || '',
             })),
           })
         } catch (err) {
@@ -748,6 +877,20 @@ function registerPanelRoutes(ctx) {
 export function apply(ctx, config = {}) {
   opts = config || {}
   const requireApproval = config?.requireApproval !== false
+
+  // The same-site proxy is started lazily by the /workspaces route. Close it
+  // when this plugin is disabled/reloaded so the port can be rebound.
+  ctx.effect(
+    () => () => {
+      if (proxyServer) {
+        try { proxyServer.close() } catch {}
+        proxyServer = null
+      }
+      proxyReady = null
+      proxyBaseUrl = ''
+    },
+    'multica-reverse proxy cleanup',
+  )
 
   for (const definition of tools) {
     ctx.effect(

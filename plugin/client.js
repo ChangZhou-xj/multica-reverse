@@ -116,8 +116,18 @@ window.__ModuleLoader__.load({
       const textareaRef = React.useRef(null)
       const [busy, setBusy] = React.useState(false)
       const [error, setError] = React.useState('')
+      // Native embedded view: iframe of Multica's own issues page (needs a manual
+      // login once inside the frame, because the cookie session is not shared).
+      const [view, setView] = React.useState('native') // 'native' | 'panel'
+      const [wsList, setWsList] = React.useState([])
+      const [wsId, setWsId] = React.useState('')
+      const [reloadKey, setReloadKey] = React.useState(0)
+      const [apiBase, setApiBase] = React.useState('')
 
       const agents = meta?.agents || []
+      const workspaces = wsList.length ? wsList : meta?.workspaces || []
+      const ws = workspaces.find((w) => w.id === wsId) || workspaces[0] || null
+      const nativeSrc = ws && apiBase ? `${apiBase}/${ws.slug}/issues` : ''
 
       const loadList = React.useCallback(async () => {
         setBusy(true)
@@ -153,6 +163,16 @@ window.__ModuleLoader__.load({
         callJson(`${API}/bootstrap`)
           .then((data) => {
             if (alive) setMeta(data)
+          })
+          .catch((err) => {
+            if (alive) setError(String(err.message || err))
+          })
+        callJson(`${API}/workspaces`)
+          .then((data) => {
+            if (!alive) return
+            setWsList(data.workspaces || [])
+            setWsId(data.current || (data.workspaces || [])[0]?.id || '')
+            setApiBase(data.base || '')
           })
           .catch((err) => {
             if (alive) setError(String(err.message || err))
@@ -275,6 +295,86 @@ window.__ModuleLoader__.load({
       }
 
       const statuses = meta?.statuses || []
+
+      const toggleBtn = (key, label) =>
+        h(
+          'button',
+          {
+            type: 'button',
+            onClick: () => setView(key),
+            style: {
+              padding: '4px 10px',
+              fontSize: 11,
+              color: view === key ? C.text : C.dim,
+              background: view === key ? C.surface2 : 'transparent',
+              border: `1px solid ${view === key ? C.accent : C.border}`,
+              borderRadius: 6,
+              cursor: 'pointer',
+            },
+          },
+          label,
+        )
+
+      const topBar = h(
+        'div',
+        {
+          style: {
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            padding: '10px 20px',
+            borderBottom: `1px solid ${C.border}`,
+            flexWrap: 'wrap',
+          },
+        },
+        h('div', { style: { fontSize: 15, fontWeight: 600, color: C.text } }, 'Multica'),
+        h(
+          'div',
+          { style: { display: 'flex', gap: 4 } },
+          toggleBtn('native', '原生页面'),
+          toggleBtn('panel', '精简面板'),
+        ),
+        h('div', { style: { flex: 1 } }),
+        workspaces.length
+          ? h(
+              'select',
+              {
+                value: ws ? ws.id : '',
+                onChange: (e) => setWsId(e.target.value),
+                style: {
+                  padding: '5px 8px',
+                  fontSize: 12,
+                  color: C.text,
+                  background: C.surface,
+                  border: `1px solid ${C.border}`,
+                  borderRadius: 6,
+                  outline: 'none',
+                },
+              },
+              workspaces.map((w) => h('option', { key: w.id, value: w.id }, w.name))
+            )
+          : null,
+        view === 'native'
+          ? h(
+              'button',
+              {
+                type: 'button',
+                onClick: () => setReloadKey((n) => n + 1),
+                title: '重新加载页面',
+                style: {
+                  padding: '5px 10px',
+                  fontSize: 12,
+                  color: C.text,
+                  background: C.surface,
+                  border: `1px solid ${C.border}`,
+                  borderRadius: 6,
+                  cursor: 'pointer',
+                },
+              },
+              '↻ 刷新'
+            )
+          : null,
+      )
 
       const header = h(
         'div',
@@ -635,23 +735,69 @@ window.__ModuleLoader__.load({
             color: C.text,
           },
         },
-        header,
-        filters,
-        error
+        topBar,
+        view === 'native'
           ? h(
               'div',
               {
                 style: {
-                  padding: '8px 20px',
-                  fontSize: 12,
-                  color: C.danger,
-                  borderBottom: `1px solid ${C.border}`,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  flex: 1,
+                  minHeight: 0,
+                  padding: '0 10px 10px',
                 },
               },
-              error,
+              h(
+                'div',
+                {
+                  style: {
+                    padding: '6px 4px',
+                    fontSize: 11,
+                    color: C.dim,
+                  },
+                },
+                nativeSrc
+                  ? `已内嵌 Multica 原生页面（${ws ? ws.name : ''}）。已通过本地同站代理自动登录，可直接在下方查看与操作。`
+                  : '正在获取工作区…',
+              ),
+              nativeSrc
+                ? h('iframe', {
+                    key: `${nativeSrc}-${reloadKey}`,
+                    src: nativeSrc,
+                    title: `Multica ${ws ? ws.name : ''}`,
+                    style: {
+                      flex: 1,
+                      width: '100%',
+                      minHeight: 0,
+                      border: `1px solid ${C.border}`,
+                      borderRadius: 8,
+                      background: C.surface,
+                    },
+                  })
+                : null,
             )
-          : null,
-        h('div', { style: { display: 'flex', flex: 1, minHeight: 0 } }, listPane, detailPane),
+          : h(
+              'div',
+              { style: { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 } },
+              header,
+              filters,
+              error
+                ? h(
+                    'div',
+                    {
+                      style: {
+                        padding: '8px 20px',
+                        fontSize: 12,
+                        color: C.danger,
+                        borderBottom: `1px solid ${C.border}`,
+                      },
+                    },
+                    error,
+                  )
+                : null,
+              h('div', { style: { display: 'flex', flex: 1, minHeight: 0 } }, listPane, detailPane),
+            ),
       )
     }
 

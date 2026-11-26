@@ -83,6 +83,7 @@ profile 名可在 `~/.multica/profiles/` 里查看；工作区 id 从 Multica �
 
 - `multica_issue_update` 默认**不会触发 agent**（`suppress_run` 默认 true）。要派活请显式传 `suppress_run: false`。
 - `multica_list_issues` 支持 `project` / `assignee` / `priority` / `due_before` 筛选，以及 `workspace` 参数（传 UUID/名称/slug/前缀）；不传则用默认工作区。
+- **跨工作区工单**：读取/评论/改状态时，工具会从工单编号前缀自动推断工作区（例如 `ABC-36` → 前缀为 `ABC` 的工作区），因此默认工作区之外的工单也能正常访问。用 UUID 引用且分属不同工作区时，需显式传 `workspace` 参数。
 - `multica_issue_stats` 的 `within_days` 默认 7 天；过期/快到期清单会自动排除 done/cancelled 状态。
 - 想在评论里触发 agent，先用 `multica_list_agents` 拿到准确的 UUID，再传给 `mention_agent_id`；工具会在正文末尾自动补上 `[@名字](mention://agent/<uuid>)`。**只有 agent / squad 会入队 run**，member 只会渲染链接。
 - 4 个写工具受 Harness 审批策略管辖：策略是 `ask` 时弹确认框；策略是 `never`（"不问，直接做"）时自动放行。插件通过 `approval.overrideOf(session)` 判断策略，不会出现"问了必被拒导致工具全废"的死锁。

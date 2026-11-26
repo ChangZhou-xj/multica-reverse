@@ -136,6 +136,7 @@ window.__ModuleLoader__.load({
           const params = new URLSearchParams()
           if (status) params.set('status', status)
           if (query.trim()) params.set('query', query.trim())
+          if (wsId) params.set('workspace', wsId)
           const data = await callJson(`${API}/issues?${params}`)
           setList(data.issues || [])
           setTotal(data.total || 0)
@@ -144,19 +145,21 @@ window.__ModuleLoader__.load({
         } finally {
           setBusy(false)
         }
-      }, [status, query])
+      }, [status, query, wsId])
 
       const openIssue = React.useCallback(async (key) => {
         setSelected(key)
         setDetail(null)
         setError('')
         try {
-          const data = await callJson(`${API}/issue?ref=${encodeURIComponent(key)}`)
+          const params = new URLSearchParams({ ref: key })
+          if (wsId) params.set('workspace', wsId)
+          const data = await callJson(`${API}/issue?${params}`)
           setDetail({ issue: data.issue, comments: data.comments || [] })
         } catch (err) {
           setError(String(err.message || err))
         }
-      }, [])
+      }, [wsId])
 
       React.useEffect(() => {
         let alive = true
@@ -190,7 +193,7 @@ window.__ModuleLoader__.load({
         if (!detail || !next) return
         setBusy(true)
         try {
-          await post(`${API}/update`, { ref: detail.issue.key, status: next })
+          await post(`${API}/update`, { ref: detail.issue.key, status: next, workspace: wsId })
           await openIssue(detail.issue.key)
           await loadList()
         } catch (err) {
@@ -283,7 +286,7 @@ window.__ModuleLoader__.load({
         if (!detail || !draft.trim()) return
         setBusy(true)
         try {
-          await post(`${API}/comment`, { ref: detail.issue.key, content: draft })
+          await post(`${API}/comment`, { ref: detail.issue.key, content: draft, workspace: wsId })
           setDraft('')
           setMention(null)
           await openIssue(detail.issue.key)

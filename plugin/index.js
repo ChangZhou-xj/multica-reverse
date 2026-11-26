@@ -79,7 +79,27 @@ async function api(method, path, body) {
   return text.trim() ? JSON.parse(text) : null
 }
 
-const q = (extra = '') => `?workspace_id=${encodeURIComponent(workspaceId())}${extra}`
+const qFor = (ws, extra = '') => `?workspace_id=${encodeURIComponent(ws)}${extra}`
+const q = (extra = '') => qFor(workspaceId(), extra)
+
+/**
+ * Pick the workspace for an issue reference. An explicit workspace wins;
+ * otherwise infer it from the key prefix (ABC-36 -> the workspace whose
+ * issue_prefix is ABC), falling back to the configured default. UUID refs
+ * carry no prefix, so pass `workspace` explicitly for those across workspaces.
+ */
+async function workspaceForRef(ref, explicit) {
+  if (explicit) return resolveWorkspace(explicit)
+  const m = String(ref || '').match(/^([A-Za-z][A-Za-z0-9]*)-\d+$/)
+  if (m) {
+    try {
+      return await resolveWorkspace(m[1])
+    } catch {
+      /* prefix not known — fall through to default */
+    }
+  }
+  return workspaceId()
+}
 
 /** Resolve a workspace UUID / name / slug / prefix to its UUID. */
 async function resolveWorkspace(value) {
@@ -196,10 +216,13 @@ const tools = [
   {
     name: 'multica_get_issue',
     description:
-      'Read one Multica issue by UUID or key (for example `ABC-8`), including its description, status, assignee, and metadata. Read-only.',
+      'Read one Multica issue by UUID or key (for example `ABC-8`), including its description, status, assignee, and metadata. Workspace is inferred from the key prefix; pass workspace explicitly for cross-workspace UUIDs. Read-only.',
     parameters: {
       type: 'object',
-      properties: { issue: { type: 'string', description: 'Issue UUID or key such as `ABC-8`.' } },
+      properties: {
+        issue: { type: 'string', description: 'Issue UUID or key such as `ABC-8`.' },
+        workspace: { type: 'string', description: 'Optional workspace UUID/name/slug/prefix; inferred from the key prefix when omitted.' },
+      },
       required: ['issue'],
       additionalProperties: false,
     },
@@ -218,7 +241,9 @@ const tools = [
         ),
     },
     async execute(args = {}) {
-      const data = await api('GET', `/api/issues/${encodeURIComponent(issueRef(args.issue))}${q()}`)
+      const ref = issueRef(args.issue)
+      const ws = await workspaceForRef(ref, args.workspace)
+      const data = await api('GET', `/api/issues/${encodeURIComponent(ref)}${qFor(ws)}`)
       return {
         id: data.id,
         key: data.identifier,
@@ -242,6 +267,7 @@ const tools = [
       properties: {
         issue: { type: 'string', description: 'Issue UUID or key.' },
         limit: { type: 'number', description: 'Maximum comments to return; defaults to 20 (most recent kept).' },
+        workspace: { type: 'string', description: 'Optional workspace UUID/name/slug/prefix; inferred from the key prefix when omitted.' },
       },
       required: ['issue'],
       additionalProperties: false,
@@ -263,7 +289,9 @@ const tools = [
         ),
     },
     async execute(args = {}) {
-      const data = await api('GET', `/api/issues/${encodeURIComponent(issueRef(args.issue))}/comments${q()}`)
+      const ref = issueRef(args.issue)
+      const ws = await workspaceForRef(ref, args.workspace)
+      const data = await api('GET', `/api/issues/${encodeURIComponent(ref)}/comments${qFor(ws)}`)
       const rows = (Array.isArray(data) ? data : data.comments || []).slice(-(Number(args.limit) || 20))
       return {
         comments: rows.map((c) => ({
@@ -285,6 +313,7 @@ const tools = [
       properties: {
         issue: { type: 'string', description: 'Issue UUID or key.' },
         limit: { type: 'number', description: 'Maximum events to return; defaults to 30.' },
+        workspace: { type: 'string', description: 'Optional workspace UUID/name/slug/prefix; inferred from the key prefix when omitted.' },
       },
       required: ['issue'],
       additionalProperties: false,
@@ -295,7 +324,9 @@ const tools = [
         text(table(value.events, ['time', 'type', 'actor', 'detail'])),
     },
     async execute(args = {}) {
-      const data = await api('GET', `/api/issues/${encodeURIComponent(issueRef(args.issue))}/timeline${q()}`)
+      const ref = issueRef(args.issue)
+      const ws = await workspaceForRef(ref, args.workspace)
+      const data = await api('GET', `/api/issues/${encodeURIComponent(ref)}/timeline${qFor(ws)}`)
       const rows = (Array.isArray(data) ? data : data.events || []).slice(-(Number(args.limit) || 30))
       return {
         events: rows.map((e) => ({
@@ -363,6 +394,7 @@ const tools = [
       properties: {
         issue: { type: 'string', description: 'Issue UUID or key.' },
         active: { type: 'boolean', description: 'Only return runs that are still queued or running.' },
+        workspace: { type: 'string', description: 'Optional workspace UUID/name/slug/prefix; inferred from the key prefix when omitted.' },
       },
       required: ['issue'],
       additionalProperties: false,
@@ -377,7 +409,9 @@ const tools = [
         ),
     },
     async execute(args = {}) {
-      const argv = ['issue', 'runs', issueRef(args.issue), '--output', 'json', '--profile', profileName(), '--workspace-id', workspaceId()]
+      const ref = issueRef(args.issue)
+      const ws = await workspaceForRef(ref, args.workspace)
+      const argv = ['issue', 'runs', ref, '--output', 'json', '--profile', profileName(), '--workspace-id', ws]
       if (args.active) argv.splice(3, 0, '--active')
       const stdout = await new Promise((resolve, reject) => {
         execFile(cliPath(), argv, { timeout: 30000, windowsHide: true, maxBuffer: 8 << 20 }, (err, out, errOut) => {
@@ -416,6 +450,7 @@ const tools = [
           items: { type: 'string' },
           description: 'Agent UUIDs whose mention should not start a run. Required when the body mentions a busy agent.',
         },
+        workspace: { type: 'string', description: 'Optional workspace UUID/name/slug/prefix; inferred from the key prefix when omitted.' },
       },
       required: ['issue', 'content'],
       additionalProperties: false,
@@ -426,6 +461,7 @@ const tools = [
     },
     async execute(args = {}) {
       const ref = issueRef(args.issue)
+      const ws = await workspaceForRef(ref, args.workspace)
       let body = String(args.content || '')
       let mentioned = ''
       if (args.mention_agent_id) {
@@ -437,7 +473,7 @@ const tools = [
       if (Array.isArray(args.suppress_agent_ids) && args.suppress_agent_ids.length) {
         payload.suppress_agent_ids = args.suppress_agent_ids.map(String)
       }
-      const created = await api('POST', `/api/issues/${encodeURIComponent(ref)}/comments${q()}`, payload)
+      const created = await api('POST', `/api/issues/${encodeURIComponent(ref)}/comments${qFor(ws)}`, payload)
       return { id: created.id, key: created.issue_id || ref, mentioned }
     },
     presentCall: (args) => ({
@@ -465,6 +501,7 @@ const tools = [
           type: 'boolean',
           description: 'Do not start an agent run for this change. Defaults to true; set false only when the user wants the agent to start working now.',
         },
+        workspace: { type: 'string', description: 'Optional workspace UUID/name/slug/prefix; inferred from the key prefix when omitted.' },
       },
       required: ['issue'],
       additionalProperties: false,
@@ -476,6 +513,7 @@ const tools = [
     },
     async execute(args = {}) {
       const ref = issueRef(args.issue)
+      const ws = await workspaceForRef(ref, args.workspace)
       const payload = {}
       for (const key of ['status', 'assignee_id', 'assignee_type', 'title', 'description', 'priority']) {
         if (args[key] !== undefined && args[key] !== '') payload[key] = args[key]
@@ -483,7 +521,7 @@ const tools = [
       if (!Object.keys(payload).length) throw new Error('Nothing to update: pass at least one field.')
       const suppress = args.suppress_run !== false
       if (suppress) payload.suppress_run = true
-      const updated = await api('PUT', `/api/issues/${encodeURIComponent(ref)}${q()}`, payload)
+      const updated = await api('PUT', `/api/issues/${encodeURIComponent(ref)}${qFor(ws)}`, payload)
       return {
         id: updated.id,
         key: updated.identifier,
@@ -515,6 +553,7 @@ const tools = [
         assignee_type: { type: 'string', enum: ['agent', 'member'], description: 'Kind of the assignee id.' },
         priority: { type: 'string', description: 'Priority value.' },
         suppress_run: { type: 'boolean', description: 'Do not start an agent run on creation. Defaults to true.' },
+        workspace: { type: 'string', description: 'Optional workspace UUID/name/slug/prefix; defaults to the configured workspace.' },
       },
       required: ['title'],
       additionalProperties: false,
@@ -535,7 +574,8 @@ const tools = [
       }
       if (args.priority) payload.priority = String(args.priority)
       if (args.suppress_run !== false) payload.suppress_run = true
-      const created = await api('POST', `/api/issues${q()}`, payload)
+      const ws = await resolveWorkspace(args.workspace)
+      const created = await api('POST', `/api/issues${qFor(ws)}`, payload)
       return { id: created.id, key: created.identifier, title: created.title, status: created.status }
     },
     presentCall: (args) => ({ card: 'generic', title: 'Create Multica issue', kind: 'edit', rawInput: args.title }),
@@ -548,6 +588,7 @@ const tools = [
       properties: {
         comment_id: { type: 'string', description: 'Comment UUID from multica_list_comments.' },
         resolved: { type: 'boolean', description: 'true to resolve, false to reopen; defaults to true.' },
+        workspace: { type: 'string', description: 'Optional workspace UUID/name/slug/prefix for cross-workspace comments.' },
       },
       required: ['comment_id'],
       additionalProperties: false,
@@ -559,7 +600,9 @@ const tools = [
     async execute(args = {}) {
       const resolved = args.resolved !== false
       const id = String(args.comment_id)
-      const path = resolved ? `/api/comments/${encodeURIComponent(id)}/resolve${q()}` : `/api/comments/${encodeURIComponent(id)}/unresolve${q()}`
+      const ws = await resolveWorkspace(args.workspace)
+      const suffix = qFor(ws)
+      const path = resolved ? `/api/comments/${encodeURIComponent(id)}/resolve${suffix}` : `/api/comments/${encodeURIComponent(id)}/unresolve${suffix}`
       const out = await api('POST', path, {})
       return { id, resolved }
     },
@@ -1006,7 +1049,8 @@ function registerPanelRoutes(ctx) {
         if (!guard(req, res)) return
         try {
           const url = new URL(req.url, 'http://localhost')
-          const params = new URLSearchParams({ workspace_id: workspaceId() })
+          const ws = await resolveWorkspace(url.searchParams.get('workspace'))
+          const params = new URLSearchParams({ workspace_id: ws })
           const status = url.searchParams.get('status')
           const query = url.searchParams.get('query')
           if (status) params.set('status', status)
@@ -1031,9 +1075,10 @@ function registerPanelRoutes(ctx) {
         try {
           const url = new URL(req.url, 'http://localhost')
           const ref = issueRef(url.searchParams.get('ref'))
+          const ws = await workspaceForRef(ref, url.searchParams.get('workspace'))
           const [issue, comments] = await Promise.all([
-            api('GET', `/api/issues/${encodeURIComponent(ref)}${q()}`),
-            api('GET', `/api/issues/${encodeURIComponent(ref)}/comments${q()}`),
+            api('GET', `/api/issues/${encodeURIComponent(ref)}${qFor(ws)}`),
+            api('GET', `/api/issues/${encodeURIComponent(ref)}/comments${qFor(ws)}`),
           ])
           reply(res, 200, {
             ok: true,
@@ -1061,9 +1106,10 @@ function registerPanelRoutes(ctx) {
         try {
           const body = await readJsonBody(req)
           const ref = issueRef(body.ref)
+          const ws = await workspaceForRef(ref, body.workspace)
           const payload = { content: String(body.content || '') }
           if (body.parent_id) payload.parent_id = String(body.parent_id)
-          const created = await api('POST', `/api/issues/${encodeURIComponent(ref)}/comments${q()}`, payload)
+          const created = await api('POST', `/api/issues/${encodeURIComponent(ref)}/comments${qFor(ws)}`, payload)
           reply(res, 200, { ok: true, id: created.id })
         } catch (err) {
           reply(res, 502, { ok: false, error: String(err.message || err) })
@@ -1079,6 +1125,7 @@ function registerPanelRoutes(ctx) {
         try {
           const body = await readJsonBody(req)
           const ref = issueRef(body.ref)
+          const ws = await workspaceForRef(ref, body.workspace)
           const payload = { suppress_run: true }
           for (const key of ['status', 'title', 'description', 'priority']) {
             if (body[key] !== undefined && body[key] !== '') payload[key] = body[key]
@@ -1086,7 +1133,7 @@ function registerPanelRoutes(ctx) {
           if (Object.keys(payload).length === 1) {
             return reply(res, 400, { ok: false, error: 'nothing to update' })
           }
-          const updated = await api('PUT', `/api/issues/${encodeURIComponent(ref)}${q()}`, payload)
+          const updated = await api('PUT', `/api/issues/${encodeURIComponent(ref)}${qFor(ws)}`, payload)
           reply(res, 200, { ok: true, issue: issuePayload(updated) })
         } catch (err) {
           reply(res, 502, { ok: false, error: String(err.message || err) })
@@ -1105,7 +1152,8 @@ function registerPanelRoutes(ctx) {
           if (!id) return reply(res, 400, { ok: false, error: 'comment_id is required' })
           const resolved = body.resolved !== false
           const verb = resolved ? 'resolve' : 'unresolve'
-          await api('POST', `/api/comments/${encodeURIComponent(id)}/${verb}${q()}`, {})
+          const ws = await resolveWorkspace(body.workspace)
+          await api('POST', `/api/comments/${encodeURIComponent(id)}/${verb}${qFor(ws)}`, {})
           reply(res, 200, { ok: true })
         } catch (err) {
           reply(res, 502, { ok: false, error: String(err.message || err) })

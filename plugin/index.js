@@ -98,12 +98,18 @@ async function workspaceForRef(ref, explicit) {
       /* prefix not known — fall through to default */
     }
   }
-  return workspaceId()
+  return resolveWorkspace()
 }
 
 /** Resolve a workspace UUID / name / slug / prefix to its UUID. */
 async function resolveWorkspace(value) {
-  if (!value) return workspaceId()
+  if (!value) {
+    // The configured default may have been deleted; fall back to first live workspace.
+    const list = await api('GET', '/api/workspaces')
+    const rows = Array.isArray(list) ? list : []
+    const hit = rows.find((w) => w.id === workspaceId())
+    return hit ? hit.id : rows[0]?.id || workspaceId()
+  }
   const v = String(value).trim()
   if (/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(v)) return v
   const list = await api('GET', '/api/workspaces')
@@ -1026,10 +1032,14 @@ function registerPanelRoutes(ctx) {
         try {
           const [list] = await Promise.all([api('GET', `/api/workspaces`)])
           const base = await ensureProxy()
+          const rows = Array.isArray(list) ? list : []
+          const current = rows.find((w) => w.id === workspaceId())
+            ? workspaceId()
+            : rows[0]?.id || workspaceId()
           reply(res, 200, {
             ok: true,
             base,
-            current: workspaceId(),
+            current,
             workspaces: (Array.isArray(list) ? list : []).map((w) => ({
               id: w.id,
               name: w.name,

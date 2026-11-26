@@ -132,6 +132,12 @@ profile 名可在 `~/.multica/profiles/` 里查看；工作区 id 从 Multica �
 
 > 说明：这是为解决跨域 iframe 被视为第三方、登录 cookie 被拦截而设计的。代理仅监听本机 loopback，Multica 凭证仍只留在 Host 侧，不会暴露给浏览器或代理客户端以外。
 
+## 工作区变更说明
+
+默认工作区被删除后，精简面板会自动回退到当前可用的第一个工作区，无需手工修改配置。
+
+跨工作区工单会从编号前缀自动推断所属工作区（如 ABC-36 属于 ABC 工作区）；UUID 形式的工单跨工作区时需显式传入 `workspace` 参数。
+
 ## 许可
 
 MIT —— 见 [LICENSE](LICENSE)。
